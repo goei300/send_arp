@@ -120,6 +120,24 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
     return true;
 }
 
+void relay_packet(pcap_t* handle) {
+    struct pcap_pkthdr header;  // header pcap gives us
+    const u_char *packet;       // actual packet
+
+    // loop for packet capturing
+    while (1) {
+        packet = pcap_next(handle, &header);
+        if (packet == NULL)  /* end of file */
+            break;
+
+        // simply send the packet back out
+        if (pcap_sendpacket(handle, packet, header.len) != 0) {
+            fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+            return;
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
 	if (argc != 4) {
 		usage();

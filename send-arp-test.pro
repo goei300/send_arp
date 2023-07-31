@@ -9,10 +9,12 @@ SOURCES += \
 	ethhdr.cpp \
 	ip.cpp \
 	mac.cpp \
+	ipv4.cpp \
 	main.cpp
 
 HEADERS += \
 	arphdr.h \
 	ethhdr.h \
 	ip.h \
-	mac.h
+	mac.h \
+	ipv4.h 
