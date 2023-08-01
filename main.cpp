@@ -142,6 +142,7 @@ void relay_packet(pcap_t* handle,const char* dev) {
 
         //Ip packet parsing
         // check Eth_type -> if ipv4 -> relay
+        struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)packet;
         if (ntohs(eth_hdr->ether_type) != ETHERTYPE_IP) continue;
 
         // modify smac to mine (attacker)
@@ -151,7 +152,6 @@ void relay_packet(pcap_t* handle,const char* dev) {
             return;
         }
 
-        struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)packet;
         memcpy(eth_hdr->ether_shost, m_mac, 6);
         free(m_mac);         
         //send to target
