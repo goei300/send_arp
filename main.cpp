@@ -9,10 +9,17 @@
 #include "ethhdr.h"
 #include "arphdr.h"
 
+#include <map>
+#include <string>
+#include <iostream>
+
+
+
 #define MAC_SIZE 6
 
 #define MTU 1500
 
+std::map<std::string, std::string> ip_to_mac;
 
 #pragma pack(push, 1)
 struct EthArpPacket final {
@@ -119,12 +126,37 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
     }
 }
 
-bool check_spoofed(pcap_t* handle){
+bool check_spoofed(const u_char *packet) {
+    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)(packet);
+    struct libnet_arp_hdr* arp_hdr = (struct libnet_arp_hdr*)(packet + LIBNET_ETH_H);
 
+    // If it's not an ARP packet, exit the function
+    if(ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP)
+        return false;
+
+    // Convert IP addresses from binary to string
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, (packet + LIBNET_ETH_H + LIBNET_ARP_H), ip, INET_ADDRSTRLEN);
+    std::string ip_str(ip);
+
+    // Convert MAC addresses from binary to string
+    char mac[18];
+    snprintf(mac, 18, "%02x:%02x:%02x:%02x:%02x:%02x", eth_hdr->ether_shost[0], eth_hdr->ether_shost[1], eth_hdr->ether_shost[2], eth_hdr->ether_shost[3], eth_hdr->ether_shost[4], eth_hdr->ether_shost[5]);
+    std::string mac_str(mac);
+
+    // If the IP is already mapped to a MAC, and it's a different MAC, we have an ARP spoofing issue
+    if (ip_to_mac.find(ip_str) != ip_to_mac.end() && ip_to_mac[ip_str] != mac_str) {
+        printf("ARP Spoofing Detected! Original MAC: %s, New MAC: %s\n", ip_to_mac[ip_str].c_str(), mac_str.c_str());
+        return true;
+    }
+
+    // Otherwise, map the IP to the MAC
+    ip_to_mac[ip_str] = mac_str;
+
+    return false;
 }
 
-
-bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
+bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet,char* dev,char* target) {
 
     EthArpPacket myPacket;
 
@@ -147,7 +179,7 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet) {
 	// myPacket.arp_.smac_ = Mac("00:00:00:00:00:00"); -> after getMyMac() 
 	// myPacket.arp_.sip_ = htonl(Ip("0.0.0.0"));  -> after getMyIp()
 	myPacket.arp_.tmac_ = Mac("00:00:00:00:00:00");
-	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
+	myPacket.arp_.tip_ = htonl(Ip(target));
 
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
     if (res != 0) {
@@ -190,7 +222,12 @@ void relay_packet(pcap_t* handle,const char* dev) {
         // -2-2) sip check (against my ip)
         // -2-3) dip check (my ip)
         //  if not? spoofing and continue
-
+        if(check_spoofed(packet)==true){
+            printf("spoofed\n");
+        }
+        else{
+            printf("no spoofed\n");
+        }
         
         memcpy(eth_hdr->ether_shost, m_mac, 6);
         free(m_mac);         
@@ -198,7 +235,7 @@ void relay_packet(pcap_t* handle,const char* dev) {
 
         if (header->len > MTU) {
             printf("jumbo frame\n");
-            return;
+            continue;
         } else if (pcap_sendpacket(handle, packet, header->len) != 0) {
             fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
             return;
