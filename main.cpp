@@ -126,36 +126,6 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
     }
 }
 
-bool check_spoofed(const u_char *packet) {
-    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)(packet);
-    struct libnet_arp_hdr* arp_hdr = (struct libnet_arp_hdr*)(packet + LIBNET_ETH_H);
-
-    // If it's not an ARP packet, exit the function
-    if(ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP)
-        return false;
-
-    // Convert IP addresses from binary to string
-    char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, (packet + LIBNET_ETH_H + LIBNET_ARP_H), ip, INET_ADDRSTRLEN);
-    std::string ip_str(ip);
-
-    // Convert MAC addresses from binary to string
-    char mac[18];
-    snprintf(mac, 18, "%02x:%02x:%02x:%02x:%02x:%02x", eth_hdr->ether_shost[0], eth_hdr->ether_shost[1], eth_hdr->ether_shost[2], eth_hdr->ether_shost[3], eth_hdr->ether_shost[4], eth_hdr->ether_shost[5]);
-    std::string mac_str(mac);
-
-    // If the IP is already mapped to a MAC, and it's a different MAC, we have an ARP spoofing issue
-    if (ip_to_mac.find(ip_str) != ip_to_mac.end() && ip_to_mac[ip_str] != mac_str) {
-        printf("ARP Spoofing Detected! Original MAC: %s, New MAC: %s\n", ip_to_mac[ip_str].c_str(), mac_str.c_str());
-        return true;
-    }
-
-    // Otherwise, map the IP to the MAC
-    ip_to_mac[ip_str] = mac_str;
-
-    return false;
-}
-
 bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet,char* dev,char* target) {
 
     EthArpPacket myPacket;
@@ -190,6 +160,35 @@ bool sendArpSpoof(pcap_t* handle, EthArpPacket &packet,char* dev,char* target) {
 
 }
 
+bool check_spoofed(const u_char *packet) {
+    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)(packet);
+    struct libnet_ipv4_hdr* ip_hdr = (struct libnet_ipv4_hdr*)(packet + LIBNET_ETH_H);
+
+    // If it's not an IPv4 packet, exit the function
+    if(ntohs(eth_hdr->ether_type) != ETHERTYPE_IP)
+        return false;
+
+    // Convert IP addresses from binary to string
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(ip_hdr->ip_src), ip, INET_ADDRSTRLEN);
+    std::string ip_str(ip);
+
+    // Convert MAC addresses from binary to string
+    char mac[18];
+    snprintf(mac, 18, "%02x:%02x:%02x:%02x:%02x:%02x", eth_hdr->ether_dhost[0], eth_hdr->ether_dhost[1], eth_hdr->ether_dhost[2], eth_hdr->ether_dhost[3], eth_hdr->ether_dhost[4], eth_hdr->ether_shost[5]);
+    std::string mac_str(mac);
+
+    // If the IP is already mapped to a MAC, and it's a different MAC, we have an ARP spoofing issue
+    if (ip_to_mac.find(ip_str) != ip_to_mac.end() && ip_to_mac[ip_str] != mac_str) {
+        printf("ARP Spoofing Detected! Original MAC: %s, New MAC: %s\n", ip_to_mac[ip_str].c_str(), mac_str.c_str());
+        return true;
+    }
+
+    // Otherwise, map the IP to the MAC
+    ip_to_mac[ip_str] = mac_str;
+
+    return false;
+}
 
 void relay_packet(pcap_t* handle,const char* dev) {
     struct pcap_pkthdr* header;  // header pcap gives us
@@ -200,9 +199,6 @@ void relay_packet(pcap_t* handle,const char* dev) {
         int res = pcap_next_ex(handle, &header, &packet);
         if (res == 0) continue;
         if (res == -1 || res == -2) break;
-
-
-
 
         //Ip packet parsing
         // check Eth_type -> if ipv4 -> relay
