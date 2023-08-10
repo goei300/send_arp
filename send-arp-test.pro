@@ -9,7 +9,9 @@ SOURCES += \
 	ethhdr.cpp \
 	ip.cpp \
 	mac.cpp \
-	ipv4.cpp \
+	utils.cpp \
+	protocoltype.cpp \
+	init.cpp \
 	main.cpp
 
 HEADERS += \
@@ -17,4 +19,8 @@ HEADERS += \
 	ethhdr.h \
 	ip.h \
 	mac.h \
+	utils.h \
+	protocoltype.h \
+	init.h \
 	ipv4.h 
+
