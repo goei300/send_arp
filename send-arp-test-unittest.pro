@@ -9,10 +9,16 @@ SOURCES += \
 	arphdr.cpp \
 	ethhdr.cpp \
 	ip.cpp \
+	utils.cpp \
+	protocoltype.cpp \
+	init.cpp \
 	mac.cpp
 
 HEADERS += \
 	arphdr.h \
 	ethhdr.h \
 	ip.h \
+	utils.h \
+	protocoltype.h \
+	init.h \
 	mac.h
